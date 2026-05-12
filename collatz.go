@@ -28,6 +28,8 @@ func worker(
 	maxNumber uint64,
 	proven []uint64,
 	counter *atomic.Uint64,
+	floor *atomic.Uint64,
+	workerProgress []paddedCounter,
 	wg *sync.WaitGroup,
 	onProgress func(id int, delta uint64),
 ) {
@@ -41,7 +43,8 @@ func worker(
 
 		for i := start; i < end; i++ {
 			current := i
-			for current > 1 && (current > maxNumber || !isProven(proven, current)) {
+			floorVal := floor.Load()
+			for current > 1 && current > floorVal && (current > maxNumber || !isProven(proven, current)) {
 				if current&1 == 0 {
 					current >>= 1
 				} else {
@@ -49,6 +52,24 @@ func worker(
 				}
 			}
 			setBit(proven, i)
+		}
+
+		// Advance the global floor: all numbers in [1, min(workerProgress)] are proven.
+		workerProgress[id].Store(end)
+		newFloor := workerProgress[0].Load()
+		for i := 1; i < len(workerProgress); i++ {
+			if v := workerProgress[i].Load(); v < newFloor {
+				newFloor = v
+			}
+		}
+		for {
+			cur := floor.Load()
+			if newFloor <= cur {
+				break
+			}
+			if floor.CompareAndSwap(cur, newFloor) {
+				break
+			}
 		}
 
 		if onProgress != nil {
@@ -67,12 +88,19 @@ func Verify(maxNumber uint64, numWorkers int, onProgress func(id int, delta uint
 	var counter atomic.Uint64
 	counter.Store(2)
 
+	workerProgress := make([]paddedCounter, numWorkers)
+	for i := range workerProgress {
+		workerProgress[i].Store(1)
+	}
+	var floor atomic.Uint64
+	floor.Store(1)
+
 	start := time.Now()
 
 	var wg sync.WaitGroup
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
-		go worker(i, maxNumber, proven, &counter, &wg, onProgress)
+		go worker(i, maxNumber, proven, &counter, &floor, workerProgress, &wg, onProgress)
 	}
 	wg.Wait()
 

@@ -22,7 +22,8 @@ go build .
 ## How it works
 
 - **Parallel workers** — one goroutine per CPU core, each claiming work in 1024-number batches via an atomic counter (dynamic scheduling, so no core sits idle)
-- **Memoization bitmap** — a 1.25 MB atomic bitset marks every number already proven to converge; chains short-circuit as soon as they hit a proven number, cutting average chain length to 1–2 steps
+- **Memoization bitmap** — an atomic bitset marks every number already proven to converge; chains short-circuit as soon as they hit a proven number, cutting average chain length to 1–2 steps
+- **Global floor** — a monotonically advancing threshold tracks the largest N where all of [1, N] are proven; any chain that drops below this floor terminates immediately without a bitmap lookup. Most impactful at 1B+ where the bitmap (125 MB) no longer fits in L3 cache
 - **Live TUI** — ANSI progress bars update every 100 ms showing per-core and overall completion, elapsed time, verification rate, and ETA
 
 No external dependencies — standard library only.
@@ -30,41 +31,46 @@ No external dependencies — standard library only.
 ## Development
 
 ```
-make dev            # full cycle: fmt → vet → race test → build (run before committing)
+make dev            # full cycle: fmt → vet → build → race test (run before committing)
 make build          # compile binary only
 make run            # go run .
 make test           # go test ./...
 make race           # go test -race ./...    ← race detector
 make bench          # benchmarks, 5s per function
+make bench-quick    # benchmarks, 3s — fast feedback during development
+make bench-large    # BenchmarkVerify1B only — floor optimization showcase (30s+)
 make bench-serial   # GOMAXPROCS=1 (measures single-core throughput for speedup math)
+make profile        # CPU profile of BenchmarkVerify100M → cpu.prof
 make esc            # escape analysis — see guide below
 make vet            # go vet
 make fmt            # gofmt -w .
 make tidy           # go mod tidy
-make clean          # remove binary and bench output files
+make clean          # remove binary, bench output, and profile files
 ```
 
 ### Reading benchmark output
 
 ```
-BenchmarkVerify10M-10       337    10617652 ns/op    1254591 B/op    13 allocs/op
-BenchmarkVerify1M-10       2804     1290755 ns/op     131912 B/op    13 allocs/op
-BenchmarkVerifySerial-10    549     6391031 ns/op     131176 B/op     4 allocs/op
-BenchmarkBitmapSetGet-10   1e9        1.779 ns/op          0 B/op     0 allocs/op
+BenchmarkVerify100M-10        5    204312000 ns/op    12546091 B/op    13 allocs/op    489 Mnums/s
+BenchmarkVerify1B-10          1   2104500000 ns/op   125000912 B/op    13 allocs/op    475 Mnums/s
+BenchmarkVerifySerial-10     14    148200000 ns/op     1311776 B/op     4 allocs/op     67 Mnums/s
+BenchmarkBitmapSetGet-10    1e9        1.779 ns/op           0 B/op     0 allocs/op
 ```
 
 | Column | Meaning |
 |--------|---------|
 | `-10` suffix | `GOMAXPROCS` — how many OS threads Go is using |
-| `337` | Iterations Go ran to produce a stable sample |
-| `ns/op` | Nanoseconds per call (`10617652 ns` ≈ 10.6 ms) |
+| `5` | Iterations Go ran to produce a stable sample |
+| `ns/op` | Nanoseconds per call (`204312000 ns` ≈ 204 ms) |
 | `B/op` | Heap bytes allocated per call (does **not** count stack) |
 | `allocs/op` | Number of distinct heap allocations per call |
+| `Mnums/s` | Custom metric: millions of numbers verified per second |
 
 **What the numbers tell you here:**
 - `BitmapSetGet: 1.779 ns/op, 0 allocs` — the atomic hot path never touches the heap. Good.
-- `Verify10M: 1254591 B/op, 13 allocs` — ~1.25 MB is the proven bitmap allocation; the 13 allocs are the bitmap plus one goroutine stack per core. All unavoidable; the inner loop itself allocates nothing.
-- `Verify10M (10.6 ms) vs VerifySerial on 1M (6.4 ms)`: serial on 1/10th the work is 6.4 ms, so serial on 10M would be ~64 ms. Parallel brings that to 10.6 ms → roughly 6× speedup across 10 cores (60% efficiency). The gap from ideal is cache-coherence traffic on the shared bitmap.
+- `Verify100M: 12.5 MB B/op, 13 allocs` — the proven bitmap; goroutine stacks account for the 13 allocs. The inner loop itself allocates nothing.
+- `Mnums/s speedup`: serial throughput is ~67 Mnums/s; parallel is ~489 Mnums/s → roughly 7× speedup across 10 cores (70% efficiency).
+- `BenchmarkVerify1B` may take 30+ seconds of wall time. Run it with `make bench-large`.
 
 ### Comparing before/after a change with benchstat
 

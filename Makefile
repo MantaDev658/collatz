@@ -1,4 +1,4 @@
-.PHONY: build run dev test race bench bench-baseline bench-count bench-serial diff esc vet fmt tidy clean install-tools
+.PHONY: build run dev test race bench bench-baseline bench-count bench-serial bench-quick bench-large diff esc vet fmt tidy clean install-tools profile
 
 # GOBIN is where `go install` places binaries — may not be in $PATH.
 GOBIN := $(shell go env GOPATH)/bin
@@ -13,7 +13,7 @@ run:
 # Full dev-cycle chain: format → vet → build → race test
 # Ordered cheapest-first: fmt and vet catch obvious issues fast;
 # build confirms compilation before the slow race test suite runs.
-dev: fmt vet build test race
+dev: fmt tidy vet build test race
 	@echo ""
 	@echo "All checks passed."
 
@@ -26,7 +26,16 @@ race:
 
 # Benchmarks
 bench:
-	go test -bench=. -benchtime=5s -benchmem ./...
+	go test -bench=. -benchtime=5s -benchmem -run=^$ ./...
+
+# Fast iteration during development (1M range, quick turnaround)
+bench-quick:
+	go test -bench=. -benchtime=3s -benchmem -run=^$ ./...
+
+# Large-range benchmark showcasing the floor optimization at 1B (bitmap exceeds L3 cache).
+# Expect 30+ seconds total.
+bench-large:
+	go test -bench=BenchmarkVerify1B -benchtime=60s -benchmem -run=^$ ./...
 
 # Run with a single OS thread to measure single-core throughput.
 # Parallelism speedup ≈ bench-serial ns/op ÷ bench ns/op (same range).
@@ -75,5 +84,13 @@ fmt:
 tidy:
 	go mod tidy
 
+# CPU profiling — writes cpu.prof then prints instructions for exploring it
+profile:
+	go test -bench=BenchmarkVerify100M -benchtime=30s -cpuprofile=cpu.prof -run=^$ ./...
+	@echo ""
+	@echo "Profile written to cpu.prof. To explore:"
+	@echo "  go tool pprof -top cpu.prof"
+	@echo "  go tool pprof -http=:6060 cpu.prof"
+
 clean:
-	rm -f collatz bench.txt bench-baseline.txt
+	rm -f collatz collatz.test bench.txt bench-baseline.txt *.prof

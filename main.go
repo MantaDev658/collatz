@@ -9,7 +9,7 @@ import (
 )
 
 func main() {
-	var maxNumber uint64 = 10_000_000_000
+	var maxNumber uint64 = 1_000_000_000
 	numCores := runtime.NumCPU()
 
 	coreCompleted := make([]paddedCounter, numCores)
@@ -21,7 +21,7 @@ func main() {
 	const inner = 53
 	fmt.Printf("\033[96m┌%s┐\033[0m\n", strings.Repeat("─", inner))
 	fmt.Printf("\033[96m│\033[0m \033[1m %-*s\033[0m\033[96m│\033[0m\n", inner-2, "Collatz Conjecture Verifier")
-	fmt.Printf("\033[96m│\033[0m   Verifying 1 \033[33m→\033[0m %-*d\033[96m│\033[0m\n", inner-20, maxNumber)
+	fmt.Printf("\033[96m│\033[0m   Verifying 1 \033[33m→\033[0m %-*d\033[96m│\033[0m\n", inner-17, maxNumber)
 	fmt.Printf("\033[96m└%s┘\033[0m\n", strings.Repeat("─", inner))
 
 	startTime := time.Now()
