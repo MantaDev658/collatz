@@ -22,8 +22,8 @@ go build .
 ## How it works
 
 - **Parallel workers** — one goroutine per CPU core, each claiming work in 1024-number batches via an atomic counter (dynamic scheduling, so no core sits idle)
-- **Memoization bitmap** — an atomic bitset marks every number already proven to converge; chains short-circuit as soon as they hit a proven number, cutting average chain length to 1–2 steps
-- **Global floor** — a monotonically advancing threshold tracks the largest N where all of [1, N] are proven; any chain that drops below this floor terminates immediately without a bitmap lookup. Most impactful at 1B+ where the bitmap (125 MB) no longer fits in L3 cache
+- **Stateless inductive verification** — each chain runs until it drops strictly below its starting number `i`; by strong induction on the naturals this is sufficient to prove convergence. Workers share nothing except the atomic work counter, so throughput scales linearly with cores at any range
+- **`TrailingZeros64` even step** — strips all factors of 2 in a single CPU instruction (TZCNT on x86, CLZ on ARM) instead of one at a time, collapsing runs like 4096 → 1 from 12 steps to 1
 - **Live TUI** — ANSI progress bars update every 100 ms showing per-core and overall completion, elapsed time, verification rate, and ETA
 
 No external dependencies — standard library only.
@@ -38,7 +38,7 @@ make test           # go test ./...
 make race           # go test -race ./...    ← race detector
 make bench          # benchmarks, 5s per function
 make bench-quick    # benchmarks, 3s — fast feedback during development
-make bench-large    # BenchmarkVerify1B only — floor optimization showcase (30s+)
+make bench-large    # BenchmarkVerify1B only — large-scale throughput showcase (30s+)
 make bench-serial   # GOMAXPROCS=1 (measures single-core throughput for speedup math)
 make profile        # CPU profile of BenchmarkVerify100M → cpu.prof
 make esc            # escape analysis — see guide below
@@ -51,26 +51,25 @@ make clean          # remove binary, bench output, and profile files
 ### Reading benchmark output
 
 ```
-BenchmarkVerify100M-10        5    204312000 ns/op    12546091 B/op    13 allocs/op    489 Mnums/s
-BenchmarkVerify1B-10          1   2104500000 ns/op   125000912 B/op    13 allocs/op    475 Mnums/s
-BenchmarkVerifySerial-10     14    148200000 ns/op     1311776 B/op     4 allocs/op     67 Mnums/s
-BenchmarkBitmapSetGet-10    1e9        1.779 ns/op           0 B/op     0 allocs/op
+BenchmarkVerify100M-10     100     53056820 ns/op    1885 Mnums/s    1889 B/op    14 allocs/op
+BenchmarkVerify1B-10        10    529075462 ns/op    1890 Mnums/s    1193 B/op    13 allocs/op
+BenchmarkVerifySerial-10   165     35870220 ns/op     278 Mnums/s      72 B/op     3 allocs/op
 ```
 
 | Column | Meaning |
 |--------|---------|
 | `-10` suffix | `GOMAXPROCS` — how many OS threads Go is using |
-| `5` | Iterations Go ran to produce a stable sample |
-| `ns/op` | Nanoseconds per call (`204312000 ns` ≈ 204 ms) |
-| `B/op` | Heap bytes allocated per call (does **not** count stack) |
-| `allocs/op` | Number of distinct heap allocations per call |
+| `100` | Iterations Go ran to produce a stable sample |
+| `ns/op` | Nanoseconds per call (`53056820 ns` ≈ 53 ms) |
 | `Mnums/s` | Custom metric: millions of numbers verified per second |
+| `B/op` | Heap bytes allocated per call — goroutine stacks only (does **not** count stack frames) |
+| `allocs/op` | Number of distinct heap allocations per call |
 
 **What the numbers tell you here:**
-- `BitmapSetGet: 1.779 ns/op, 0 allocs` — the atomic hot path never touches the heap. Good.
-- `Verify100M: 12.5 MB B/op, 13 allocs` — the proven bitmap; goroutine stacks account for the 13 allocs. The inner loop itself allocates nothing.
-- `Mnums/s speedup`: serial throughput is ~67 Mnums/s; parallel is ~489 Mnums/s → roughly 7× speedup across 10 cores (70% efficiency).
-- `BenchmarkVerify1B` may take 30+ seconds of wall time. Run it with `make bench-large`.
+- `Verify100M` and `Verify1B` have nearly identical `Mnums/s` (~1890): the algorithm is compute-bound, not memory-bound. There is no memory wall at 1B because there's no bitmap.
+- `B/op` is ~1.9 KB (goroutine stacks), down from 12.5 MB with the old bitmap approach. The inner loop allocates nothing.
+- `Mnums/s speedup`: serial is ~279 Mnums/s; parallel is ~1890 Mnums/s → roughly 6.8× across 10 cores (68% efficiency). The gap from ideal is work-stealing overhead and cache-coherence traffic on the shared counter.
+- `BenchmarkVerify1B` may take 30+ seconds total. Run it with `make bench-large`.
 
 ### Comparing before/after a change with benchstat
 
@@ -84,9 +83,9 @@ make diff                    # re-runs benchmarks → bench.txt, then compares
 Benchstat output looks like:
 
 ```
-name              old time/op    new time/op    delta
-Verify10M-10      10.6ms ± 2%    9.8ms ± 1%    -7.5%  (p=0.001 n=10+10)
-BitmapSetGet-10   1.78ns ± 1%   1.75ns ± 0%    -1.7%  (p=0.032 n=10+10)
+name               old time/op    new time/op    delta
+Verify100M-10      53.1ms ± 2%    49.8ms ± 1%    -6.2%  (p=0.001 n=10+10)
+VerifySerial-10    35.9ms ± 1%    34.1ms ± 0%    -5.0%  (p=0.032 n=10+10)
 ```
 
 - `±2%` — variance across 10 runs. Above ~5% means the environment is noisy; close other apps and re-run.
@@ -101,21 +100,14 @@ BitmapSetGet-10   1.78ns ± 1%   1.75ns ± 0%    -1.7%  (p=0.032 n=10+10)
 
 **collatz.go — the hot path (what actually matters)**
 ```
-./collatz.go:18:6: can inline setBit          ← hot-path function inlined, no call overhead
-./collatz.go:22:6: can inline isProven        ← same
-./collatz.go:44:56: inlining call to isProven ← compiler actually used the inline
-./collatz.go:51:10: inlining call to setBit
+./collatz.go:22:2: counter does not escape    ← work counter stays on stack in worker ✓
+./collatz.go:24:2: onProgress does not escape ← callback stays on stack in worker ✓
 
-./collatz.go:18:13: proven does not escape    ← bitmap slice stays on stack in hot path ✓
-./collatz.go:29:2:  proven does not escape    ← same in worker ✓
-./collatz.go:30:2:  counter does not escape   ← work counter stays on stack in worker ✓
-
-./collatz.go:64:16: make([]uint64, ...) escapes to heap   ← 1.25 MB bitmap, unavoidable
-./collatz.go:67:6:  moved to heap: counter                ← captured by goroutine closure, unavoidable
-./collatz.go:72:6:  moved to heap: wg                     ← same
+./collatz.go:57:6: moved to heap: counter     ← captured by goroutine closure, unavoidable
+./collatz.go:62:6: moved to heap: wg          ← same
 ```
 
-The three "does not escape" lines are the green light: the tight inner loop — `setBit`, `isProven`, and the Collatz iteration — never touches the heap. The three heap allocations are all one-time setup costs per `Verify` call.
+The two "does not escape" lines are the green light: the inner Collatz loop is pure register arithmetic — `current` never touches the heap, and `TrailingZeros64` compiles to a single instruction. The two heap allocations (`counter` and `wg`) are one-time closure captures per `Verify` call, not per-number costs. There is no bitmap allocation.
 
 **tui.go — expected allocations, not a concern**
 

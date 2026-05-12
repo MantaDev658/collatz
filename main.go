@@ -9,7 +9,7 @@ import (
 )
 
 func main() {
-	var maxNumber uint64 = 1_000_000_000
+	var maxNumber uint64 = 50_000_000_000
 	numCores := runtime.NumCPU()
 
 	coreCompleted := make([]paddedCounter, numCores)
