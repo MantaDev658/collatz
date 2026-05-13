@@ -9,6 +9,35 @@ import (
 
 const batchSize = 1024
 
+const (
+	sieveBits = 20
+	sieveSize = 1 << sieveBits
+	sieveMask = sieveSize - 1
+)
+
+// skip[r] is true when all n ≡ r (mod sieveSize) provably drop below n.
+// Soundness: after m steps with the same parity sequence, T^m(n) = A·n + B
+// where A,B depend only on the low sieveBits of n. If T^m(r) < r then A < 1
+// and B < (1-A)·r, so T^m(n) < n for all n ≡ r (mod sieveSize) with n ≥ r.
+var skip [sieveSize]bool
+
+func init() {
+	for r := uint64(2); r < sieveSize; r++ {
+		current := r
+		for range sieveBits * 3 {
+			if current < r {
+				skip[r] = true
+				break
+			}
+			if current&1 == 0 {
+				current >>= bits.TrailingZeros64(current)
+			} else {
+				current = (3*current + 1) >> 1
+			}
+		}
+	}
+}
+
 // paddedCounter pads atomic.Uint64 to a full CPU cache line (64 bytes) to
 // prevent false sharing when goroutines update adjacent per-core counters.
 type paddedCounter struct {
@@ -32,9 +61,10 @@ func worker(
 		end := min(start+batchSize, maxNumber+1)
 
 		for i := start; i < end; i++ {
+			if skip[i&sieveMask] {
+				continue
+			}
 			current := i
-			// Stop when the chain drops strictly below i: by strong induction,
-			// everything below i is already proven to converge.
 			for current >= i {
 				if current&1 == 0 {
 					current >>= bits.TrailingZeros64(current)

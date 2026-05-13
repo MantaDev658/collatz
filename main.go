@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -9,7 +10,10 @@ import (
 )
 
 func main() {
-	var maxNumber uint64 = 50_000_000_000
+	var base uint64 = 2
+	var exp uint64 = 41
+
+	var maxNumber uint64 = uint64(math.Pow(float64(base), float64(exp)))
 	numCores := runtime.NumCPU()
 
 	coreCompleted := make([]paddedCounter, numCores)
